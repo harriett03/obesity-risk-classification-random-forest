@@ -1,0 +1,614 @@
+---
+output:
+  html_document:
+    toc: false
+    toc_depth: '3'
+    df_print: paged
+  word_document:
+    toc: false
+    toc_depth: 3
+    fig_caption: true
+  pdf_document:
+    toc: false
+    toc_depth: '3'
+---
+ 
+# Obesity Risk Classification: Random Forest Analysis
+# Obesity dataset project
+    
+# Section 1 — Introduction and Context [10%]
+The World Health Organization estimates that over one billion people worldwide are obese, a condition linked to increased risk of type 2 diabetes, cardiovascular disease, musculoskeletal disorders, and early death,(World Health Organization, 2024). While body mass index, remains the standard clinical criterion for obesity classification, behavioural variables such as dietary habits, physical activity frequency, and sedentary behaviour are considerably more actionable from a public health perspective, as they represent modifiable risk factors amenable to intervention. Whether lifestyle information alone can accurately classify obesity level therefore has direct implications for the design of screening tools that do not depend on clinical measurement infrastructure.
+
+This study examines a 90% subset of the Obesity Levels dataset (Mendoza Palechor and de la Hoz Manotas, 2019). The dataset was created via an anonymous online survey targeting individuals aged 14-61 from Colombia, Peru, and Mexico (Mendoza Palechor and de la Hoz Manotas, 2019)
+
+By calculating each respondent's body mass index using the formula BMI = Weight ÷ Height² and mapping the result against WHO classification thresholds and Mexican health normativity, the target variable, NObesity, encodes seven ordered obesity-related categories, ranging from Insufficient Weight to Obesity Type III. The 485 actual survey records were significantly unbalanced between obesity categories, which would lead classification algorithms to learn disproportionately in favour of majority classes. This is a crucial compositional characteristic of the dataset, which the authors specifically noted.
+To address this, SMOTE (Chawla et al., 2002) was used to expand the dataset to 2,111 records, though this synthetic oversampling may introduce noise and reduce empirical validity (Mendoza Palechor and de la Hoz Manotas, 2019).
+
+The central research question is:
+In comparison to a model that incorporates physical measurement factors like height and weight, how effectively can the amount of obesity be predicted from behavioural and lifestyle variables alone? 
+Model A: just uses lifestyle and behavioural variables. 
+Model B: includes height and weight. 
+Random Forest was chosen for its ability to capture non-linear interactions and generate variable importance rankings. Multinomial logistic regression technique was taken into consideration but rejected due to violated linearity assumptions. 
+Crucially, NObesity labels derive directly from height and weight via the BMI formula. As a result, Model B effectively gives the model access to the same variables that were used to calculate the result, its high accuracy should be seen as an artefact of the dataset's design rather than as proof of significant real-world predictive potential.
+
+```{r sampleloading}
+library(tidyverse)
+
+set.seed(23011967)
+
+data <- read.csv("ObesityDataSet_raw_and_data_sinthetic.csv")
+
+n           <- nrow(data)
+sample_rows <- sample(1:n, size = round(0.9 * n), replace = FALSE)
+data_sample <- data[sample_rows, ]
+
+dim(data_sample)  # Should be 1899 rows, 17 columns
+```
+
+```{r dataexploring}
+library(tidyverse)
+
+data <- read.csv("ObesityDataSet_raw_and_data_sinthetic.csv")
+n <- nrow(data)
+sample_rows <- sample(1:n, size = round(0.9 * n), replace = FALSE)
+data_sample <- data[sample_rows, ]
+
+# Basic structure
+glimpse(data_sample)
+summary(data_sample)
+
+# Check duplicates
+sum(duplicated(data_sample))
+
+# Check missing values
+colSums(is.na(data_sample))
+```
+
+```{r samplecleaning}
+data_clean <- data_sample %>%
+  distinct() %>%
+  mutate(
+    Gender = factor(Gender),
+    family_history_with_overweight = factor(family_history_with_overweight),
+    FAVC = factor(FAVC),
+    CAEC = factor(CAEC, levels = c("no", "Sometimes", "Frequently", "Always"), 
+                  ordered = TRUE),
+    SMOKE = factor(SMOKE),
+    SCC = factor(SCC),
+    CALC = factor(CALC, levels = c("no", "Sometimes", "Frequently", "Always"), 
+                  ordered = TRUE),
+    MTRANS = factor(MTRANS),
+    NObeyesdad = factor(NObeyesdad, levels = c(
+      "Insufficient_Weight", "Normal_Weight",
+      "Overweight_Level_I", "Overweight_Level_II",
+      "Obesity_Type_I", "Obesity_Type_II", "Obesity_Type_III"
+    ))  # ordered = TRUE removed intentionally for Random Forest compatibility
+  )
+
+dim(data_clean)
+```
+
+
+# Section 2 — Exploratory Analysis and Data Quality [20%]
+## 2.1 Data Quality
+
+The analytical sample of 1,900 observations was evaluated for data quality in four dimensions prior to analysis; the results are reported in Table 1. Because of the preprocessing done by the original authors before SMOTE augmentation, no missing values were found for any of the 17 variables. Nevertheless, a clean analytical sample of 1,879 observations was obtained when 21 duplicate rows were found and eliminated. The weight range of 39.1–173.0 kg and the height range of 1.45–1.98 m are compatible with the stated population of people aged 14–61; no implausible values were found among continuous variables.
+Before analysis, eight character variables Gender, family_history_with_overweight, FAVC, CAEC, SMOKE, SCC, CALC, MTRANS, were transformed into factors. CAEC and CALC were encoded as ordered factors that reflected their inherent severity progression. In accordance with the specifications of the Random Forest classifier utilised in later modelling, the NObesity outcome variable was encoded as an unordered factor with values grouped in escalating obesity severity.
+
+```{r data-quality-table}
+# Data quality summary table
+quality_summary <- tibble(
+  Issue = c("Missing values", "Duplicate rows", "Implausible values", 
+            "Class imbalance", "Variable encoding"),
+  Finding = c("None detected across all 17 variables",
+              "21 duplicate rows identified",
+              "None detected; weight range 39–173kg plausible",
+              "Mild; classes broadly balanced post-SMOTE",
+              "8 character variables require factor conversion"),
+  Action = c("No action required",
+             "Removed prior to analysis (n = 1,879 retained)",
+             "No action required",
+             "Stratified train-test split applied in modelling", "Converted to ordered and unordered factors")
+)
+
+knitr::kable(quality_summary, 
+             caption = "Table 1: Data quality assessment summary")
+```
+
+```{r plot1-class-distribution}
+# Plot 1: Outcome class distribution
+ggplot(data_clean, aes(x = NObeyesdad)) +
+  geom_bar(fill = "#2C7BB6") +
+  geom_text(stat = "count", aes(label = after_stat(count)), 
+            vjust = -0.5, size = 3.5) +
+  labs(
+    title = "Obesity categories are approximately balanced across seven classes",
+    x = "Obesity Level",
+    y = "Number of Individuals",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## 2.2 Class Distribution
+
+Figure 1 shows the distribution of the target variable across seven obesity categories. 
+With numbers ranging from 234 (Insufficient Weight) to 318 (Obesity Type I), the distribution is roughly balanced after SMOTE augmentation. When analysing model performance in Section 4, it is crucial to recognise that this near-balance is an artefact of the synthetic oversampling procedure rather than a representation of actual population prevalence. Obesity groups would be far more unbalanced in real-world population statistics, with normal weight and overweight categories predominating.
+
+```{r plot2-weight-by-class}
+# Plot 2: Weight distribution by obesity class
+ggplot(data_clean, aes(x = NObeyesdad, y = Weight, fill = NObeyesdad)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_fill_viridis_d(direction = -1) +
+  labs(
+    title = "Weight increases progressively across obesity categories,\nconfirming label validity",
+    x = "Obesity Level",
+    y = "Weight (kg)",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(    axis.text.x = element_text(angle = 35, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## 2.3 Weight Distribution Across Obesity Categories
+
+The weight distribution for each category of obesity is shown in Figure 2. The interquartile ranges show a distinct division between neighbouring groups, with the mean weight rising monotonically from 50.1 kg among those categorised as Insufficient Weight to 121.0 kg among those classed as Obesity Type III. The mathematical foundation of the NObesity labels, which were obtained from BMI computed using height and weight, is directly reflected in this pattern. Therefore, rather than being a new analytical discovery, this plot functions mainly as a validation check verifying label integrity. Crucially, it also drives the main analytical challenge of this paper, which is whether behavioural factors alone preserve relevant predictive signal given that height and weight deterministically encode the result.
+
+```{r plot3-physical-activity}
+# Plot 3: Physical activity frequency by obesity class
+annot_y <- max(data_clean$FAF, na.rm = TRUE) * 1.1 
+
+ggplot(data_clean, aes(x = NObeyesdad, y = FAF, fill = NObeyesdad)) +
+  geom_violin(show.legend = FALSE, alpha = 0.8) +
+  geom_boxplot(width = 0.1, show.legend = FALSE, fill = "white") +
+  scale_fill_viridis_d(direction = -1) +
+  annotate("segment", x = 3, xend = 5, y = annot_y, yend = annot_y,
+           color = "grey30", linetype = "dashed") +
+  annotate("segment", x = 3, xend = 3, y = annot_y, yend = annot_y * 0.95,
+           color = "grey30") +
+  annotate("segment", x = 5, xend = 5, y = annot_y, yend = annot_y * 0.95,
+           color = "grey30") +
+  annotate("text", x = 4, y = annot_y * 1.08,
+           label = "Nearly identical means (1.07 vs 0.98)\ndespite non-adjacent categories",
+           size = 3, color = "grey20", fontface = "italic") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+  labs(
+    title = "Physical activity frequency shows no consistent decline\nacross increasing obesity severity",
+    x = "Obesity Level",
+    y = "Physical Activity Frequency (days/week)",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1),
+        panel.grid.major.x = element_blank())
+```
+
+## 2.4 Physical Activity Across Obesity Categories
+
+Figure 3 shows physical activity frequency by obesity group, with mean frequency declining overall from around 1.3 days per week (Insufficient Weight) to under 0.7 (Obesity Type III). From the annotation, Overweight Level I and Obesity Type I break this trend with near-identical means despite being non-adjacent categories. The overlapping violin shapes indicate significant within category heterogeneity, indicating that physical activity by itself has little diagnostic value. In order to contribute significantly to classification, it probably requires additional behavioural variables, which are tested directly through variable importance in Section 4.
+
+```{r plot4-family-history}
+# Plot 4: Family history proportions by obesity class
+data_clean %>%
+  group_by(NObeyesdad, family_history_with_overweight) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(NObeyesdad) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = NObeyesdad, y = prop, 
+             fill = family_history_with_overweight)) +
+  geom_col(position = "stack") +  geom_text(aes(label = paste0(round(prop * 100, 1), "%")),
+            position = position_stack(vjust = 0.5),
+            color = "white", size = 3, fontface = "bold")+ 
+  scale_fill_manual(
+    values = c("yes" = "#2C7BB6", "no" = "#D7191C"),
+    labels = c("yes" = "Yes", "no" = "No"),
+    name = "Family History\nof Overweight"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Family history of overweight is predominant across\nall higher obesity categories",
+    x = "Obesity Level",
+    y = "Proportion of Individuals",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## 2.5 Family History of Overweight
+
+The proportions are indicated directly on the chart in Figure 4, which displays the family history of overweight by obese category. One of Model A's most powerful discriminating signals is family history, which climbs from around half in the lowest-weight groups to 100% in Type II and III obesity. Its predictive value, however, refers to shared context rather than a single changeable activity since it probably reflects common family environment and genetic predisposition rather than a real behavioural habit.
+
+```{r plot5-correlation-heatmap}
+# Plot 5: Correlation heatmap of numeric variables
+library(reshape2)
+
+numeric_vars <- data_clean %>%
+  select(Age, Height, Weight, FCVC, NCP, CH2O, FAF, TUE)
+
+cor_matrix <- cor(numeric_vars)
+cor_melted <- melt(cor_matrix)
+
+ggplot(cor_melted, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  scale_fill_gradient2(
+    low = "#D7191C", mid = "white", high = "#2C7BB6",
+    midpoint = 0, limits = c(-1, 1),
+    name = "Correlation"
+  ) +
+  labs(
+    title = "Weight and height are strongly correlated,\nreflecting their role in BMI calculation",
+    x = NULL, y = NULL,
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+## 2.6 Correlations Among Continuous Variables
+
+A correlation heatmap of the dataset's eight continuous variables is shown in Figure 5. Given their common involvement in the BMI calculation that underpins the outcome labels, it is not surprising that weight and height have the greatest association (r = 0.46). The remaining behavioural variables—FCVC, NCP, CH2O, FAF, and TUE—show almost no associations with each other or with the anthropometric factors, although weight and age have a modest positive link (r = 0.19). Model A is reassured by the lack of significant multicollinearity across behavioural predictors, which suggests that these variables provide comparatively independent information to the classification task.
+
+```{r calc-checks, echo=FALSE, results='hide'}
+table(data_clean$NObeyesdad)
+data_clean %>%
+  group_by(NObeyesdad) %>%
+  summarise(
+    mean_weight = round(mean(Weight), 1),
+    median_weight = round(median(Weight), 1)
+  )
+data_clean %>%
+  group_by(NObeyesdad) %>%
+  summarise(mean_FAF = round(mean(FAF), 2))
+data_clean %>%
+  group_by(NObeyesdad, family_history_with_overweight) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(NObeyesdad) %>%
+  mutate(prop = round(n / sum(n) * 100, 1)) %>%
+  filter(family_history_with_overweight == "yes")
+cor(data_clean$Weight, data_clean$Height)
+cor(data_clean$Weight, data_clean$Age)
+```
+
+
+# 3. Statistical Methods
+## 3.1 Data Preparation
+
+Using a stratified random split over the seven NObesity categories, the cleaned sample (n = 1,879) was divided into training (80%, n = 1,503) and test (20%, n = 376) sets. In this case, stratification is important since even post-SMOTE class numbers vary from 234 to 318; in the absence of stratification, less common categories, such as Insufficient Weight, can be accidentally under-represented in the test set, inflating apparent per-class performance.
+The training division was used to construct two model datasets. Gender, age, family history of being overweight, FAVC, FCVC, NCP, CAEC, SMOKE, CH2O, SCC, FAF, TUE, CALC, and MTRANS are all behavioural and lifestyle factors that are retained in Model A, however Height and Weight are not. Weight and Height are added to the same set in Model B. By separating the predictive value of physical measurement from behavioural data alone, this division immediately operationalises the study topic.
+
+## 3.2 Choice of Method
+The classifier for both models was Random Forest (Breiman, 2001). Using bootstrap samples and random predictor subsets at each split, it creates an ensemble of decision trees, integrating predictions by majority vote to lower variance. The dataset's mixed continuous, binary, and ordinal predictors can be accommodated without significant preparation; it generates permutation-based variable importance scores that allow direct comparison of behavioural and anthropometric predictors across models; it handles seven-class outcomes natively without one-versus-rest decomposition; and it captures the non-linear and non-monotonic relationships observed in the EDA without requiring a specified functional form.
+Because the results of the EDA violate the linearity assumption of multinomial logistic regression, it was rejected. There are three restrictions: Importance scores indicate predictive contribution rather than causal influence; Random Forest treats the obesity categories as nominal, possibly lacking ordinal structure that could help adjacent-category discrimination; and even though the test set is held out before modelling, performance may still be inflated by the similarity between synthetic training and test observations produced by SMOTE.
+
+## 3.3 Model Evaluation
+A classifier may perform well on the larger Obesity Type I category while incorrectly classifying smaller ones like Insufficient Weight, with little impact on the headline figure, even though SMOTE has made class sizes generally comparable (234–318 observations). As a result, four complementing measures were employed. The percentage of properly identified observations is provided by overall accuracy. By averaging per-class recall, balanced accuracy assigns equal weight to all categories, regardless of size. The harmonic mean of accuracy and recall, or per-class F1 scores, show which particular categories are most difficult to describe.
+Finally, confusion matrices were utilised to show precisely which category pairs produce the mistakes since misclassifying nearby severity categories (such as Overweight Level I as Overweight Level II) is qualitatively less problematic than mistaking distant ones (such as Normal Weight as Obesity Type III).
+
+```{r modelling, include=TRUE}
+library(randomForest)
+library(caret)
+
+set.seed(23011967)
+train_index <- createDataPartition(data_clean$NObeyesdad, 
+                                    p = 0.8, list = FALSE)
+train_data <- data_clean[train_index, ]
+test_data  <- data_clean[-train_index, ]
+
+model_A_vars <- c("Gender", "Age", "family_history_with_overweight",
+                  "FAVC", "FCVC", "NCP", "CAEC", "SMOKE", "CH2O",
+                  "SCC", "FAF", "TUE", "CALC", "MTRANS", "NObeyesdad")
+
+train_A <- train_data[, model_A_vars]
+test_A  <- test_data[, model_A_vars]
+train_B <- train_data
+test_B  <- test_data
+
+rf_A <- randomForest(NObeyesdad ~ ., data = train_A, 
+                     ntree = 500, importance = TRUE)
+rf_B <- randomForest(NObeyesdad ~ ., data = train_B, 
+                     ntree = 500, importance = TRUE)
+
+pred_A <- predict(rf_A, test_A)
+pred_B <- predict(rf_B, test_B)
+
+cm_A <- confusionMatrix(pred_A, test_A$NObeyesdad)
+cm_B <- confusionMatrix(pred_B, test_B$NObeyesdad)
+
+bal_acc_A <- mean(cm_A$byClass[, "Balanced Accuracy"])
+bal_acc_B <- mean(cm_B$byClass[, "Balanced Accuracy"])
+```
+
+```{r confusion-matrix-setup, include=TRUE}
+cm_A_df <- as.data.frame(cm_A$table) %>%
+  rename(Predicted = Prediction, Actual = Reference)
+
+cm_B_df <- as.data.frame(cm_B$table) %>%
+  rename(Predicted = Prediction, Actual = Reference)
+
+short_labels <- c(
+  "Insufficient_Weight" = "Insuff.",
+  "Normal_Weight"       = "Normal",
+  "Overweight_Level_I"  = "OW I",
+  "Overweight_Level_II" = "OW II",
+  "Obesity_Type_I"      = "Ob I",
+  "Obesity_Type_II"     = "Ob II",
+  "Obesity_Type_III"    = "Ob III"
+)
+```
+
+
+# Section 4 - Results and Data Communication [30%]
+
+## 4.1 Model Performance Comparison
+
+```{r }
+# Overall accuracy
+cat("Model A Accuracy:", round(cm_A$overall["Accuracy"], 4), "\n")
+cat("Model B Accuracy:", round(cm_B$overall["Accuracy"], 4), "\n")
+
+# Balanced accuracy
+cat("Model A Balanced Accuracy:", 
+    round(mean(cm_A$byClass[,"Balanced Accuracy"]), 4), "\n")
+cat("Model B Balanced Accuracy:", 
+    round(mean(cm_B$byClass[,"Balanced Accuracy"]), 4), "\n")
+
+# Per class F1 scores
+cat("\nModel A F1 Scores:\n")
+print(round(cm_A$byClass[,"F1"], 4))
+
+cat("\nModel B F1 Scores:\n")
+print(round(cm_B$byClass[,"F1"], 4))
+
+```
+
+```{r }
+# Variable importance for both models
+importance_A <- importance(rf_A, type = 1) %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Importance = MeanDecreaseAccuracy) %>%
+  arrange(desc(Importance))
+
+importance_B <- importance(rf_B, type = 1) %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Importance = MeanDecreaseAccuracy) %>%
+  arrange(desc(Importance))
+
+print(importance_A)
+print(importance_B)
+
+```
+
+Overall accuracy rises from 81.8% to 93.6% when height and weight are included. Behavioural variables alone place the majority of individuals within one severity band of their true category a level of accuracy that has real screening implications even without a scale or tape measure.  Adding height and weight narrows that gap further, but the 11.8 percentage point difference in overall accuracy reveals that physical measurements contribute a concentrated predictive signal that behavioural information alone cannot replicate. 
+
+Balanced accuracy — which accounts for differential performance across the seven obesity categories — tells a similar story, rising from 89.2% in Model A to 96.0% in Model B. The gap between overall and balanced accuracy in Model A (81.8% vs 89.2%) reflects the fact that Model A struggles disproportionately with certain middle categories. Crucially, both figures should be interpreted in the context of the dataset's construction: 77% of observations are synthetically generated via SMOTE, and performance estimates on synthetic test observations likely overstate the accuracy that would be achieved on genuinely observed clinical data. 
+
+
+```{r performance-table}
+perf_table <- tibble(
+  Metric = c("Overall Accuracy", "Balanced Accuracy",
+             "F1 — Insufficient Weight", "F1 — Normal Weight",
+             "F1 — Overweight Level I", "F1 — Overweight Level II",
+             "F1 — Obesity Type I", "F1 — Obesity Type II",
+             "F1 — Obesity Type III"),
+  `Model A (Behavioural)` = c("81.8%", "89.2%",
+                               "0.876", "0.689", "0.777",
+                               "0.701", "0.825", "0.865", "0.983"),
+  `Model B (All Predictors)` = c("93.6%", "96.0%",
+                                  "0.930", "0.860", "0.857",
+                                  "0.944", "0.984", "0.971", "0.983")
+)
+knitr::kable(perf_table,
+             caption = "Table 2: Model performance comparison across all evaluation metrics")
+```
+
+
+```{r plot6-f1-comparison, fig.cap="Figure 6: Per-class F1 scores for Model A and Model B across seven obesity categories."}
+# Add model label annotations directly to first category bars
+# instead of using fill legend
+
+f1_data <- tibble(
+  Category = rep(c("Insufficient\nWeight", "Normal\nWeight",
+                   "Overweight\nLevel I", "Overweight\nLevel II",
+                   "Obesity\nType I", "Obesity\nType II",
+                   "Obesity\nType III"), 2),
+  F1 = c(0.8764, 0.6885, 0.7765, 0.7010, 0.8254, 0.8649, 0.9828,
+          0.9302, 0.8596, 0.8571, 0.9444, 0.9841, 0.9714, 0.9828),
+  Model = rep(c("Model A: Behavioural Only",
+                "Model B: All Predictors"), each = 7)
+) 
+
+ggplot(f1_data, aes(x = Category, y = F1, fill = Model)) +
+  geom_col(position = "dodge") +
+  geom_hline(yintercept = 0.9, linetype = "dashed", 
+             color = "grey40", linewidth = 0.5) +
+  scale_fill_manual(values = c(
+    "Model A: Behavioural Only" = "#D7191C",
+    "Model B: All Predictors"   = "#2C7BB6"
+  )) +
+  annotate("text", x = 0.8, y = 0.91,
+           label = "Model A", color = "#D7191C",
+           fontface = "bold", size = 3.2, hjust = 0) +
+  annotate("text", x = 1.2, y = 0.91,
+           label = "Model B", color = "#2C7BB6",
+           fontface = "bold", size = 3.2, hjust = 0) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.2),
+                     labels = scales::number_format(accuracy = 0.1)) +
+  annotate("text", x = 6.8, y = 0.915,
+           label = "F1 = 0.90", size = 3, color = "grey40") +
+  labs(
+    title = "Adding height and weight improves F1 most in middle obesity categories",
+    x = "Obesity Category",
+    y = "F1 Score",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",   # <-- remove legend
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(size = 8)
+  )
+```
+
+## 4.2 Per Class Performance
+Per-class F1 scores for both models in each of the seven obesity categories are shown in Figure 6. Performance in Model A differs significantly between classes. Normal Weight (F1 = 0.69) and Overweight Level II (F1 = 0.70), which both occupy intermediate places in the obesity severity continuum where behavioural signals are most unclear and overlapping, are the two most challenging groups to diagnose. Obesity Type III, on the other hand, obtains an F1 of 0.98 in Model A, indicating that the most extreme obesity group is sufficiently unique in behaviour to be consistently diagnosed without physical measures.
+
+With the exception of Obesity Type III, which stays at 0.98, Model B does better in every category. Obesity Type I (0.83 → 0.98) and Overweight Level II (0.70 → 0.94), where height and weight offer the strongest discriminating signal, have the biggest increases. Normal Weight continues to be the weakest category in Model B (F1 = 0.86), indicating that there is some irreducible ambiguity involved in differentiating normal weight individuals from those at adjacent severity levels even with physical measurements. This is likely a result of SMOTE-generated observations blurring the boundaries between categories.
+
+```{r plot7-variable-importance, fig.cap="Figure 7: Variable importance scores (mean decrease in accuracy) for Model A and Model B."}
+library(ggplot2)
+library(dplyr)
+
+# Get shared variables between both models (all of Model A's vars appear in B)
+imp_combined <- importance_A %>%
+  rename(Imp_A = Importance) %>%
+  inner_join(importance_B %>% rename(Imp_B = Importance), by = "Variable") %>%
+  mutate(delta = Imp_B - Imp_A) %>%
+  arrange(desc(Imp_A)) %>%
+  slice_head(n = 12)   # top 12 by Model A importance
+
+imp_long <- imp_combined %>%
+  pivot_longer(cols = c(Imp_A, Imp_B),
+               names_to = "Model", values_to = "Importance") %>%
+  mutate(Model = recode(Model,
+    "Imp_A" = "Model A: Behavioural Only",
+    "Imp_B" = "Model B: All Predictors"
+  ))
+
+ggplot() +
+  # connecting line between the two dots for each variable
+  geom_segment(data = imp_combined,
+               aes(x = Imp_A, xend = Imp_B,
+                   y = reorder(Variable, Imp_A), yend = reorder(Variable, Imp_A)),
+               color = "grey70", linewidth = 0.8) +
+  # dots
+  geom_point(data = imp_long,
+             aes(x = Importance,
+                 y = reorder(Variable, Importance),
+                 color = Model),
+             size = 3) +
+  scale_color_manual(values = c(
+    "Model A: Behavioural Only" = "#D7191C",
+    "Model B: All Predictors"   = "#2C7BB6"
+  )) +
+  labs(
+    title = "Behavioural predictors lose importance when height and weight are added",
+    x = "Mean Decrease in Accuracy",
+    y = NULL,
+    color = NULL,
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+
+## 4.3 Variable Importance
+Variable significance scores for both models are shown in Figure 7. These values are calculated as the mean drop in classification accuracy upon permutation. The three most significant behavioural predictors in Model A are vegetable consumption frequency (FCVC, 79.7), age (72.8), and gender (72.7), followed by number of main meals (NCP, 54.3) and family history of overweight (57.0). In line with the weak and non-monotonic association seen in EDA, physical activity frequency (FAF, 49.2) comes in at number seven. Model A uses a mix of dietary, demographic, and habitual predictors rather than a single lifestyle variable to dominate categorisation, as seen by the reasonably uniform distribution of significance scores across behavioural predictors.
+
+Weight alone has a significance score of 117.4 in Model B, which is more than twice as high as the next predictor, height (52.4). All behavioural factors lose significant weight when physical measures are taken into account: family history declines from 57.0 to 28.5 and FCVC drops from 79.7 in Model A to 37.2 in Model B. This trend is completely compatible with the way the dataset was constructed because the result is mathematically encoded by height and weight, which were used to produce NObesity labels straight from the BMI calculation. Therefore, the variable significance plot shows an artefact of label production rather than a true clinical finding: In part, Model B is rediscovering the target variable's creation formula.
+
+```{r plot8-confusion-matrix-A, fig.cap="Figure 8: Confusion matrix for Model A — behavioural predictors only."}
+cm_A_df %>%
+  mutate(
+    Predicted = recode(Predicted, !!!short_labels),
+    Actual    = recode(Actual,    !!!short_labels),
+    Predicted = factor(Predicted, levels = short_labels),
+    Actual    = factor(Actual,    levels = short_labels),
+    on_diag   = Predicted == Actual          # <-- flag diagonal
+  ) %>%
+  ggplot(aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(aes(color = on_diag, linewidth = on_diag)) +  # highlight border
+  geom_text(aes(label = Freq), size = 3.5) +
+  scale_fill_gradient(low = "white", high = "#D7191C", name = "Count") +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "white"),
+                     guide = "none") +
+  scale_linewidth_manual(values = c("TRUE" = 1.2, "FALSE" = 0.3),
+                         guide = "none") +
+  labs(
+    title = "Model A misclassification concentrates between adjacent obesity categories",
+    x = "Actual Category", y = "Predicted Category",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) 
+```
+
+```{r plot9-confusion-matrix-B, fig.cap="Figure 9: Confusion matrix for Model B — all predictors including height and weight."}
+# Confusion matrix Model B
+cm_B_df %>%
+  mutate(
+    Predicted = recode(Predicted, !!!short_labels),
+    Actual    = recode(Actual,    !!!short_labels),
+    Predicted = factor(Predicted, levels = short_labels),
+    Actual    = factor(Actual,    levels = short_labels),
+    on_diag   = Predicted == Actual
+  ) %>%
+  ggplot(aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(aes(color = on_diag, linewidth = on_diag)) +
+  geom_text(aes(label = Freq), size = 3.5) +
+  scale_fill_gradient(low = "white", high = "#2C7BB6", name = "Count") +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "white"),
+                     guide = "none") +
+  scale_linewidth_manual(values = c("TRUE" = 1.2, "FALSE" = 0.3),
+                         guide = "none") +
+  labs(
+    title = "Model B misclassification is minimal and confined to adjacent categories",
+    x = "Actual Category",
+    y = "Predicted Category",
+    caption = "Source: Mendoza Palechor & de la Hoz Manotas (2019)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) 
+```
+
+## 4.4 Confusion Matrix Analysis
+Confusion matrices for Model A and Model B are shown in Figures 8 and 9, respectively. The most common misclassification in Model A is between neighbouring obesity categories: Normal Weight data are misclassified as Overweight Level I, while Overweight Level II observations are mistaken for both Overweight Level I and Obesity Type I. The model seldom mistakes distant categories like Insufficient Weight and Obesity Type III, indicating that it has acquired the wide severity gradient even from behavioural data alone. This trend is comforting to understand. With nearly all of the misclassification focused in the Normal Weight category, where a limited number of observations are allocated to neighbouring classes, Model B's confusion matrix is far clearer.
+
+
+# Section 5 
+## 5a Before-and-After Visual Comparison
+Figure 10 displays the confusion matrix for Model A in its default condition, created using ggplot2 without design revisions; Figure 8 displays the final version. Full variable names are shown along both axes in the default version, which overlap and become unreadable without rotation. The fill makes use of ggplot's default grey gradient, which lacks visual cues and makes it challenging to discern between high and low frequency cells. Regardless of whether a cell has zero or forty misclassifications, each cell is given identical visual weight, and the title only identifies the type of chart rather than offering a conclusion.
+
+```{r plot-before-confusion-matrix, fig.cap="Figure 10: Default confusion matrix output before design improvements."}
+# BEFORE version — default ggplot confusion matrix
+cm_A_df %>%
+  ggplot(aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq)) +
+  labs(title = "Confusion Matrix — Model A")
+```
+All of these issues are addressed in the final version. To make angled text appear clearly, category labels were shortened to Insuff., OW I, OW II, and Ob I. High-count cells are highlighted by a single-hue white-to-red gradient, while low-count cells recede. This directly applies visual hierarchy, with off-diagonal cells serving as context and the diagonal serving as the signal. This is further reinforced by bold diagonal borders. Frequency counts displayed immediately on each tile eliminate the need to cross-reference a caption, and the action title presents the analytical conclusion prior to the reader seeing the data. 
+
+## 5b Honest Account of Design Decisions
+There were two extremely challenging design choices. The confusion matrix colour scheme was the subject of the first. For a matrix where all values are non-negative counts, an original diverging red-white-blue palette suggested that high counts were positive and low counts were negative. This is a misleading affordance. This was fixed by switching to single-hue sequential palettes, although when frequency ranges vary, having the same colour for both matrices would suggest a similar scale. Model identification is aided by the solution, which was red for Model A and blue for Model B. However, this involves acknowledging that colour intensity alone cannot be used to compare the two matrices, a trade-off that is recognised in the report language.
+
+The second concerned Figure 7. An initial faceted bar chart with free y-axis scales made each model's internal importance distribution readable but prevented direct cross-model comparison. Switching to a dumbbell plot placed both models on a shared axis, making it immediately visible how much each behavioural predictor's importance shifts when height and weight are added. The trade-off is that Weight's dominance compresses behavioural variables toward the left — but this compression is the finding itself, and the axis range communicates that dominance honestly.
+
+## 5c Connection to Module Principles
+Throughout, the affordance principle influenced the choice of chart type. The stacked bar chart in Figure 4 encodes family history proportions with a constant zero baseline, making it easy to see how the obesity categories have increased. A grouped bar chart was utilised in an earlier draft, which made within-category comparison easier while hiding the true finding—a cross-category trend. This choice was immediately altered by realising that the type of chart dictates which comparisons felt natural.
+The clearance of clutter was done regularly. Gridlines on both axes, a grey panel backdrop, and legends that frequently overlap data are features of the default ggplot2 output. Each map eliminates category-axis gridlines, has a simple backdrop, and, if feasible, substitutes direct labels for legends. Colour selections were also influenced by accessibility: the red-blue combination was chosen in part because, in contrast to red-green pairings, it is still identifiable under deuteranopia, supporting the idea that design shouldn't unintentionally exclude readers.
+
+## 5d Analytical Limitations
+
+There are four restrictions that call for prudence. First, SMOTE created 77% of the artificial observations before to the train-test split. Accuracy on this test set probably overstates performance on really observed clinical data since synthetic observations are constructed to match its real neighbours; hence, all measures should be regarded as upper bounds rather than clinical usefulness estimates.
+Second, NObesity labels were determined deterministically using BMI based on height and weight. Therefore, rather than exhibiting true predictive ability, Model B only partially recovers the formula used to get the result. Without this context, a reader would mistakenly believe that physical measures are powerful independent indicators of obesity based on its 93.6% accuracy.
+Third, the dataset's generalisability to other demographics and clinical contexts is limited since it is geographically limited to Mexico, Peru, and Colombia using an online convenience sample. Lastly, Random Forest ignores the natural severity ordering of obesity categories by considering them as nominal means, and an ordinal classifier may result in very different misclassification patterns for neighbouring categories.
+
+# Reference 
